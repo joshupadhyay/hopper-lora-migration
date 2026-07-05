@@ -1098,16 +1098,29 @@ def main(args):
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
     latents_mean = (torch.tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1)).to(accelerator.device)
     latents_std = 1.0 / torch.tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1).to(accelerator.device)
-    text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, torch_dtype=weight_dtype
-    )
     quantization_config = None
+    te_quantization_config = None
     if args.bnb_quantization_config_path is not None:
         with open(args.bnb_quantization_config_path, "r") as f:
             config_kwargs = json.load(f)
             if "load_in_4bit" in config_kwargs and config_kwargs["load_in_4bit"]:
                 config_kwargs["bnb_4bit_compute_dtype"] = weight_dtype
         quantization_config = BitsAndBytesConfig(**config_kwargs)
+        # PATCH(hopper-lora-migration): also quantize the 7B text encoder
+        # (inference-only here). bf16 TE (~15GB) + NF4 transformer (~12GB)
+        # OOMs a 24GB card during text-embedding precompute.
+        from transformers import BitsAndBytesConfig as TransformersBnbConfig
+
+        te_quantization_config = TransformersBnbConfig(**config_kwargs)
+
+    text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        args.pretrained_model_name_or_path,
+        subfolder="text_encoder",
+        revision=args.revision,
+        torch_dtype=weight_dtype,
+        quantization_config=te_quantization_config,
+        device_map={"": 0} if te_quantization_config is not None else None,
+    )
 
     transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -1134,7 +1147,10 @@ def main(args):
     to_kwargs = {"dtype": weight_dtype, "device": accelerator.device} if not args.offload else {"dtype": weight_dtype}
     # flux vae is stable in bf16 so load it in weight_dtype to reduce memory
     vae.to(**to_kwargs)
-    text_encoder.to(**to_kwargs)
+    if te_quantization_config is None:
+        # PATCH(hopper-lora-migration): .to() is unsupported on bnb-quantized
+        # models; the quantized TE was already placed on GPU at load time.
+        text_encoder.to(**to_kwargs)
     # we never offload the transformer to CPU, so we can just use the accelerator device
     transformer_to_kwargs = (
         {"device": accelerator.device}
@@ -1417,7 +1433,13 @@ def main(args):
         del vae
 
     # move back to cpu before deleting to ensure memory is freed see: https://github.com/huggingface/diffusers/issues/11376#issue-3008144624
-    text_encoding_pipeline = text_encoding_pipeline.to("cpu")
+    if te_quantization_config is None:
+        # PATCH(hopper-lora-migration): skip the CPU move for a bnb-quantized TE
+        # (unsupported). Drop the pipeline holding the last TE reference so the
+        # GPU memory is actually released before the training loop.
+        text_encoding_pipeline = text_encoding_pipeline.to("cpu")
+    else:
+        del text_encoding_pipeline
     del text_encoder, tokenizer
     free_memory()
 

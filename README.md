@@ -34,9 +34,20 @@ the current HF token.
 
 - **Base model:** Qwen/Qwen-Image
 - **Training:** official diffusers `train_dreambooth_lora_qwen_image.py`
-  (vendored in `vendor/`), rank 16, lr 1e-4 constant, bf16, cached latents,
-  8-bit Adam, gradient checkpointing
-- **Compute:** Modal H100 (80 GB)
+  (vendored + patched in `vendor/`), QLoRA — NF4-quantized base, rank 16,
+  lr 1e-4 constant, bf16 compute, cached latents, 8-bit Adam, gradient
+  checkpointing
+- **Compute:** Modal A10G (24 GB) — the workspace has no payment method on
+  file, which caps it at 24GB GPUs. Fitting a 20B MMDiT there required:
+  - NF4-quantizing the transformer (~12 GB) via the script's built-in
+    `--bnb_quantization_config_path`
+  - **patching the vendored script** to also NF4-quantize the 7B Qwen2.5-VL
+    text encoder (~15 GB bf16 → ~4.5 GB): both must be resident during
+    text-embedding precompute, and 12+15 GB OOMs a 24 GB card. Patches are
+    marked `PATCH(hopper-lora-migration)` in `vendor/`.
+  - dropping `--offload` (`.to()` is unsupported on bnb-quantized models)
+- **Perf:** ~25 s/optimizer step (batch 1, grad-accum 4, 1024px) → 500 steps
+  ≈ 3.5 h ≈ $4 of A10G time
 - **Data:** reuses the `hopper-training-data` Modal volume from hopper-gen
 
 ## Usage
