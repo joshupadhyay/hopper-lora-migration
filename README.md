@@ -65,3 +65,18 @@ modal volume get hopper-training-data outputs-qwen/qwen-v1 ./samples/
 ```
 
 Requires the `huggingface-secret` Modal secret (HF_TOKEN).
+
+## Results (qwen-v1-h100)
+
+500 optimizer steps (batch 1, grad-accum 4, rank 16) — **25 min / ~$2 on
+H100**. Adapter: `hopper-training-data` volume at
+`adapters-qwen/qwen-v1-h100/pytorch_lora_weights.safetensors` (checkpoints
+every 125 steps). Samples in [`samples/qwen-v1-h100/`](samples/qwen-v1-h100/)
+— all six validation prompts (including an out-of-distribution "self-driving
+car charging station") came back with Hopper's muted palette, lone figures,
+hard directional light, and painterly texture.
+
+| | |
+|---|---|
+| ![diner](samples/qwen-v1-h100/sample_0.png) | ![bedroom](samples/qwen-v1-h100/sample_1.png) |
+| ![charging station](samples/qwen-v1-h100/sample_5.png) | ![lighthouse](samples/qwen-v1-h100/sample_4.png) |
