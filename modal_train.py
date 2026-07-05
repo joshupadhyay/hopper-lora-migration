@@ -52,8 +52,7 @@ image = (
 
 @app.function(
     image=image,
-    gpu="A10G",  # account is limited to 24GB GPUs (no payment method on file);
-    # the 20B base model is NF4-quantized to fit (QLoRA)
+    gpu="H100",  # bf16 training; pass --quantize for the 24GB-GPU QLoRA path
     timeout=36000,
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
@@ -64,6 +63,7 @@ def train(
     rank: int = 16,
     learning_rate: float = 1e-4,
     checkpointing_steps: int = 150,
+    quantize: bool = False,
 ):
     import json
     import shutil
@@ -91,18 +91,21 @@ def train(
 
     output_dir = f"{DATA_DIR}/adapters-qwen/{run_name}"
 
-    # NF4 quantization config so the 20B transformer fits in 24GB
-    bnb_config_path = "/root/bnb_nf4.json"
-    with open(bnb_config_path, "w") as f:
-        json.dump(
-            {
-                "load_in_4bit": True,
-                "bnb_4bit_quant_type": "nf4",
-                "bnb_4bit_compute_dtype": "bfloat16",
-                "bnb_4bit_use_double_quant": True,
-            },
-            f,
-        )
+    # NF4 quantization config so the 20B transformer fits in 24GB (QLoRA path)
+    quant_args = []
+    if quantize:
+        bnb_config_path = "/root/bnb_nf4.json"
+        with open(bnb_config_path, "w") as f:
+            json.dump(
+                {
+                    "load_in_4bit": True,
+                    "bnb_4bit_quant_type": "nf4",
+                    "bnb_4bit_compute_dtype": "bfloat16",
+                    "bnb_4bit_use_double_quant": True,
+                },
+                f,
+            )
+        quant_args = ["--bnb_quantization_config_path", bnb_config_path]
 
     cmd = [
         "accelerate", "launch", "--num_processes=1", "--mixed_precision=bf16",
@@ -123,12 +126,12 @@ def train(
         "--lr_warmup_steps", "0",
         "--max_train_steps", str(max_train_steps),
         "--checkpointing_steps", str(checkpointing_steps),
-        "--bnb_quantization_config_path", bnb_config_path,
+        *quant_args,
         "--use_8bit_adam",
         "--gradient_checkpointing",
         "--cache_latents",
-        # no --offload: everything is GPU-resident (quantized TE + transformer);
-        # offload's .to() calls are unsupported on bnb-quantized models
+        # no --offload: on H100 everything fits; on the QLoRA path offload's
+        # .to() calls are unsupported on bnb-quantized models
         "--seed", "42",
     ]
     print("Launching:", " ".join(cmd))
@@ -150,8 +153,9 @@ def main(
     rank: int = 16,
     learning_rate: float = 1e-4,
     checkpointing_steps: int = 150,
+    quantize: bool = False,
 ):
-    result = train.remote(run_name, max_train_steps, rank, learning_rate, checkpointing_steps)
+    result = train.remote(run_name, max_train_steps, rank, learning_rate, checkpointing_steps, quantize)
     print("\n" + "=" * 40)
     for k, v in result.items():
         print(f"  {k}: {v}")

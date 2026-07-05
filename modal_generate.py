@@ -47,32 +47,41 @@ PROMPTS = [
 
 @app.function(
     image=image,
-    gpu="A10G",  # account is limited to 24GB GPUs; base model is NF4-quantized
+    gpu="H100",  # bf16 inference; pass --quantize for the 24GB-GPU NF4 path
     timeout=7200,
     volumes={DATA_DIR: training_data, HF_CACHE_DIR: model_cache},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def generate(run_name: str = "qwen-v1", checkpoint: str = "", lora_scale: float = 1.0, num_images: int = 0):
+def generate(
+    run_name: str = "qwen-v1",
+    checkpoint: str = "",
+    lora_scale: float = 1.0,
+    num_images: int = 0,
+    quantize: bool = False,
+):
     import torch
     from pathlib import Path
     from diffusers import QwenImagePipeline
-    from diffusers.quantizers import PipelineQuantizationConfig
 
     adapter_dir = Path(DATA_DIR) / "adapters-qwen" / run_name
     if checkpoint:
         adapter_dir = adapter_dir / checkpoint
     print(f"Loading LoRA from {adapter_dir}")
 
-    quant_config = PipelineQuantizationConfig(
-        quant_backend="bitsandbytes_4bit",
-        quant_kwargs={
-            "load_in_4bit": True,
-            "bnb_4bit_quant_type": "nf4",
-            "bnb_4bit_compute_dtype": torch.bfloat16,
-            "bnb_4bit_use_double_quant": True,
-        },
-        components_to_quantize=["transformer", "text_encoder"],
-    )
+    quant_config = None
+    if quantize:
+        from diffusers.quantizers import PipelineQuantizationConfig
+
+        quant_config = PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs={
+                "load_in_4bit": True,
+                "bnb_4bit_quant_type": "nf4",
+                "bnb_4bit_compute_dtype": torch.bfloat16,
+                "bnb_4bit_use_double_quant": True,
+            },
+            components_to_quantize=["transformer", "text_encoder"],
+        )
     pipe = QwenImagePipeline.from_pretrained(
         MODEL_ID, torch_dtype=torch.bfloat16, quantization_config=quant_config
     )
@@ -104,7 +113,13 @@ def generate(run_name: str = "qwen-v1", checkpoint: str = "", lora_scale: float 
 
 
 @app.local_entrypoint()
-def main(run_name: str = "qwen-v1", checkpoint: str = "", lora_scale: float = 1.0, num_images: int = 0):
-    result = generate.remote(run_name, checkpoint, lora_scale, num_images)
+def main(
+    run_name: str = "qwen-v1",
+    checkpoint: str = "",
+    lora_scale: float = 1.0,
+    num_images: int = 0,
+    quantize: bool = False,
+):
+    result = generate.remote(run_name, checkpoint, lora_scale, num_images, quantize)
     print(result)
     print(f"\nDownload with: modal volume get hopper-training-data {result['output_dir'].removeprefix('/data/')} ./samples/")
